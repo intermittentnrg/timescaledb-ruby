@@ -1,4 +1,52 @@
 RSpec.describe Timescaledb::MigrationHelpers, database_cleaner_strategy: :truncation do
+  context 'reversible' do
+    let(:con) { ActiveRecord::Base.connection }
+
+    before(:each) do
+      con.drop_table :ticks, if_exists: true, force: :cascade
+      con.create_table :ticks, hypertable: hypertable_options, id: false do |t|
+        t.string :symbol
+        t.decimal :price
+        t.integer :volume
+        t.timestamps
+      end
+    end
+
+    let(:hypertable_options) do
+      {
+        time_column: 'created_at',
+        chunk_time_interval: '1 min',
+        compress_segmentby: 'symbol',
+        compress_orderby: 'created_at',
+        compress_after: '7 days'
+      }
+    end
+
+    subject(:migration) do
+      Class.new(ActiveRecord::Migration::Current) do
+        def change
+          query = <<~SQL
+            SELECT time_bucket('1m', created_at) as time,
+              symbol,
+              FIRST(price, created_at) as open,
+              MAX(price) as high,
+              MIN(price) as low,
+              LAST(price, created_at) as close,
+              SUM(volume) as volume FROM "ticks" GROUP BY 1,2
+          SQL
+          create_continuous_aggregates('ohlc_1m', query, with_data: true)
+        end
+      end.new
+    end
+
+    it do
+      expect(con).to receive(:create_continuous_aggregates).once.and_call_original
+      expect(con).to receive(:drop_continuous_aggregates).once.and_call_original
+      migration.migrate(:up)
+      migration.migrate(:down)
+    end
+  end
+
   describe ".create_table" do
     let(:con) { ActiveRecord::Base.connection }
 
